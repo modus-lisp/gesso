@@ -18,8 +18,10 @@
     sp))
 
 (defun %square-subpath (cx cy hw)
-  (%quad-subpath (- cx hw) (- cy hw) (+ cx hw) (- cy hw)
-                 (+ cx hw) (+ cy hw) (- cx hw) (+ cy hw)))
+  ;; wound the same way as a segment rectangle so the non-zero fill unions
+  ;; (rather than cancels) where a join square overlaps its segments
+  (%quad-subpath (- cx hw) (- cy hw) (- cx hw) (+ cy hw)
+                 (+ cx hw) (+ cy hw) (+ cx hw) (- cy hw)))
 
 (defun stroke-subpaths (cv subpaths color line-width alpha)
   "Stroke SUBPATHS (device-space polylines) onto scribe canvas CV."
