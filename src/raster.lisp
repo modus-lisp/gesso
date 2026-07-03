@@ -1,0 +1,54 @@
+;;;; raster.lisp — fill a set of subpaths by scan-converting through scribe.
+;;;;
+;;;; Device-space polylines are handed to scribe:rasterize-outline (the analytic
+;;;; signed-area rasterizer used for glyph outlines) as move/line contours, then
+;;;; the returned coverage bitmap is composited onto the canvas with the fill
+;;;; colour.  scribe's rasterizer is authored for font outlines (y-up, y flipped
+;;;; on output); a canvas is y-down, so we feed negated y and an origin that
+;;;; un-flips it, landing coverage row 0 at the top of the shape's bounding box.
+(in-package #:gesso)
+
+(defun %paths-bbox (subpaths)
+  "Device-space (values minx miny maxx maxy) over all points, or NIL if empty."
+  (let ((minx 1d30) (miny 1d30) (maxx -1d30) (maxy -1d30) (any nil))
+    (dolist (sp subpaths)
+      (loop for p across (subpath-points sp) do
+        (setf any t
+              minx (min minx (car p)) maxx (max maxx (car p))
+              miny (min miny (cdr p)) maxy (max maxy (cdr p)))))
+    (when any (values minx miny maxx maxy))))
+
+(defun %subpath-contour (sp)
+  "One scribe contour (a move + lines, y negated) for subpath SP, or NIL if SP
+   has fewer than two points."
+  (let ((pts (subpath-points sp)))
+    (when (>= (length pts) 2)
+      (let ((segs (list (list :move (car (aref pts 0)) (- (cdr (aref pts 0)))))))
+        (loop for i from 1 below (length pts)
+              do (push (list :line (car (aref pts i)) (- (cdr (aref pts i)))) segs))
+        (nreverse segs)))))
+
+(defun %blit-coverage (cv cov w h ix0 iy0 color alpha)
+  "Composite coverage bitmap COV (w*h) at device origin (IX0,IY0) with COLOR
+   (r g b) scaled by ALPHA in [0,1]."
+  (let ((a (df alpha)))
+    (dotimes (yy h)
+      (let ((py (+ iy0 yy)) (row (* yy w)))
+        (dotimes (xx w)
+          (let ((c (aref cov (+ row xx))))
+            (when (> c 0d0)
+              (scribe:blend-coverage cv (+ ix0 xx) py (* c a) color))))))))
+
+(defun fill-subpaths (cv subpaths color alpha)
+  "Non-zero-winding fill of SUBPATHS onto scribe canvas CV with COLOR and ALPHA."
+  (multiple-value-bind (minx miny) (%paths-bbox subpaths)
+    (when minx
+      (let* ((ix0 (floor minx)) (iy0 (floor miny))
+             (contours (loop for sp in subpaths
+                             for c = (%subpath-contour sp)
+                             when c collect c)))
+        (when contours
+          (multiple-value-bind (cov w h)
+              (scribe:rasterize-outline contours 1d0
+                                        :origin-x (df ix0) :origin-y (df (- iy0)))
+            (when cov (%blit-coverage cv cov w h ix0 iy0 color alpha))))))))

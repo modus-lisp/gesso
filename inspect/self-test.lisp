@@ -1,0 +1,75 @@
+;;;; self-test.lisp — exercises the gesso 2D pipeline end to end.
+;;;;   sbcl --script inspect/self-test.lisp
+(require :asdf)
+(push (truename (merge-pathnames "../" (directory-namestring *load-truename*))) asdf:*central-registry*)
+(push (truename (merge-pathnames "../../scribe/" (directory-namestring *load-truename*))) asdf:*central-registry*)
+(asdf:load-system "gesso")
+(defpackage #:gesso.self-test (:use #:cl) (:local-nicknames (#:g #:gesso) (#:s #:scribe)))
+(in-package #:gesso.self-test)
+
+(defvar *pass* 0) (defvar *fail* 0)
+(defun ok (label test) (if test (incf *pass*) (progn (incf *fail*) (format t "~&FAIL ~a~%" label))))
+
+(defun px (ctx x y)
+  (let* ((cv (g:context-canvas ctx)) (w (s:canvas-width cv)) (p (s:canvas-pixels cv))
+         (i (* 3 (+ (* y w) x))))
+    (list (aref p i) (aref p (+ i 1)) (aref p (+ i 2)))))
+
+(defun ink (ctx)
+  (let* ((cv (g:context-canvas ctx)) (p (s:canvas-pixels cv)) (n 0))
+    (loop for i from 0 below (length p) by 3
+          unless (and (= (aref p i) 255) (= (aref p (+ i 1)) 255) (= (aref p (+ i 2)) 255))
+            do (incf n))
+    n))
+
+(defun near (a b &optional (tol 12)) (<= (abs (- a b)) tol))
+(defun color-near (c want) (every #'near c want))
+
+;;; fill-rect lands the fill colour on an interior pixel
+(let ((ctx (g:make-context 64 64)))
+  (g:set-fill ctx '(220 30 30))
+  (g:fill-rect ctx 10 10 20 20)
+  (ok "fill-rect interior colour" (color-near (px ctx 20 20) '(220 30 30)))
+  (ok "fill-rect leaves outside untouched" (color-near (px ctx 2 2) '(255 255 255))))
+
+;;; a filled triangle path covers its centroid and not a far corner
+(let ((ctx (g:make-context 64 64)))
+  (g:set-fill ctx '(20 120 220))
+  (g:begin-path ctx)
+  (g:move-to ctx 32 8) (g:line-to ctx 56 56) (g:line-to ctx 8 56) (g:close-path ctx)
+  (g:fill-path ctx)
+  (ok "triangle fills centroid" (color-near (px ctx 32 44) '(20 120 220)))
+  (ok "triangle misses top corner" (color-near (px ctx 4 4) '(255 255 255))))
+
+;;; a stroked horizontal line lays ink along its length at the right thickness
+(let ((ctx (g:make-context 64 64)))
+  (g:set-stroke ctx '(0 0 0)) (g:set-line-width ctx 4)
+  (g:begin-path ctx) (g:move-to ctx 8 32) (g:line-to ctx 56 32) (g:stroke-path ctx)
+  (ok "stroke covers the line" (not (color-near (px ctx 32 32) '(255 255 255))))
+  (ok "stroke has width (>=1px above centre)" (not (color-near (px ctx 32 31) '(255 255 255))))
+  (ok "stroke does not bleed far off-line" (color-near (px ctx 32 40) '(255 255 255))))
+
+;;; transforms: a translated + scaled rect lands where the CTM puts it
+(let ((ctx (g:make-context 64 64)))
+  (g:set-fill ctx '(0 0 0))
+  (g:save ctx) (g:translate ctx 20 20) (g:scale ctx 2 2)
+  (g:fill-rect ctx 0 0 5 5)            ; device rect 20,20 .. 30,30
+  (g:restore ctx)
+  (ok "transformed rect at mapped centre" (color-near (px ctx 25 25) '(0 0 0)))
+  (ok "transformed rect clear before origin" (color-near (px ctx 15 15) '(255 255 255))))
+
+;;; fillText through scribe puts ink down and advances measureText > 0
+(let ((ctx (g:make-context 200 48)))
+  (g:set-fill ctx '(0 0 0)) (g:set-font ctx 28)
+  (let ((before (ink ctx)))
+    (g:fill-text ctx "Ag" 8 34)
+    (ok "fillText draws glyph ink" (> (ink ctx) (+ before 30)))
+    (ok "measureText advance positive" (> (g:measure-text ctx "Ag") 0d0))))
+
+;;; drawImage blits a source canvas
+(let ((ctx (g:make-context 40 40)) (src (s:make-canvas 10 10 '(10 200 10))))
+  (g:draw-image ctx src 5 5 20 20)
+  (ok "drawImage blits source colour" (color-near (px ctx 15 15) '(10 200 10))))
+
+(format t "~&gesso self-test: ~a passed, ~a failed~%" *pass* *fail*)
+(when (plusp *fail*) (uiop:quit 1))

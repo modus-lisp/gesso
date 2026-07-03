@@ -1,0 +1,20 @@
+;;;; packages.lisp — gesso package definition.
+(defpackage #:gesso
+  (:use #:cl)
+  (:export
+   ;; context lifecycle
+   #:context #:make-context #:context-canvas #:context-width #:context-height
+   #:write-png
+   ;; state stack + drawing state
+   #:save #:restore
+   #:set-fill #:set-stroke #:set-line-width #:set-global-alpha #:set-font
+   ;; transforms
+   #:translate #:scale #:rotate #:transform #:set-transform #:reset-transform
+   ;; path building
+   #:begin-path #:move-to #:line-to #:quadratic-curve-to #:bezier-curve-to
+   #:arc #:arc-to #:ellipse #:rect #:close-path
+   ;; painting
+   #:fill-path #:stroke-path #:fill-rect #:stroke-rect #:clear-rect
+   #:fill-text #:stroke-text #:measure-text #:draw-image
+   ;; affine helpers (matrix.lisp)
+   #:mat-identity #:mat-mul #:mat-apply #:mat-translate #:mat-scale #:mat-rotate))
