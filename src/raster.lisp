@@ -28,6 +28,22 @@
               do (push (list :line (car (aref pts i)) (- (cdr (aref pts i)))) segs))
         (nreverse segs)))))
 
+(defun path-user-bounds (ctx)
+  "(values minx miny maxx maxy) of the current path in USER space (the current
+   path's device bounds mapped back through the inverse CTM), or NIL if empty.
+   Used to place an objectBoundingBox gradient over a shape."
+  (multiple-value-bind (dnx dny dxx dxy) (%paths-bbox (context-subpaths ctx))
+    (when dnx
+      (let ((inv (mat-invert (ctm ctx))))
+        (if (null inv)
+            (values dnx dny dxx dxy)
+            (let ((xs '()) (ys '()))
+              (dolist (c (list (cons dnx dny) (cons dxx dny) (cons dxx dxy) (cons dnx dxy)))
+                (multiple-value-bind (ux uy) (mat-apply inv (car c) (cdr c))
+                  (push ux xs) (push uy ys)))
+              (values (reduce #'min xs) (reduce #'min ys)
+                      (reduce #'max xs) (reduce #'max ys))))))))
+
 (defun %blit-coverage (cv cov w h ix0 iy0 paint alpha inv)
   "Composite coverage bitmap COV (w*h) at device origin (IX0,IY0) with PAINT scaled
    by ALPHA in [0,1].  PAINT is a solid (r g b) list or a GRADIENT; a gradient is

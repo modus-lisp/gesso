@@ -18,7 +18,7 @@
    #:fill-text #:stroke-text #:measure-text #:draw-image
    ;; paint sources (paint.lisp)
    #:gradient #:gradient-p #:make-linear-gradient #:make-radial-gradient
-   #:add-color-stop #:gradient-color-at #:paint->solid
+   #:add-color-stop #:gradient-color-at #:paint->solid #:path-user-bounds
    ;; affine helpers (matrix.lisp)
    #:mat-identity #:mat-mul #:mat-apply #:mat-translate #:mat-scale #:mat-rotate
    #:mat-invert))
