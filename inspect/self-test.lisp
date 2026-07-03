@@ -71,5 +71,37 @@
   (g:draw-image ctx src 5 5 20 20)
   (ok "drawImage blits source colour" (color-near (px ctx 15 15) '(10 200 10))))
 
+;;; a horizontal linear gradient interpolates left->right across the fill
+(let ((ctx (g:make-context 100 20)))
+  (let ((grad (g:make-linear-gradient 0 0 100 0)))
+    (g:add-color-stop grad 0d0 '(255 0 0))
+    (g:add-color-stop grad 1d0 '(0 0 255))
+    (g:set-fill ctx grad)
+    (g:fill-rect ctx 0 0 100 20))
+  (ok "gradient left stop is red"   (color-near (px ctx 2 10) '(255 0 0)))
+  (ok "gradient midpoint is purple" (color-near (px ctx 50 10) '(128 0 128)))
+  (ok "gradient right stop is blue" (color-near (px ctx 97 10) '(0 0 255))))
+
+;;; a radial gradient runs centre -> edge
+(let ((ctx (g:make-context 60 60)))
+  (let ((grad (g:make-radial-gradient 30 30 0 30 30 30)))
+    (g:add-color-stop grad 0d0 '(255 255 0))
+    (g:add-color-stop grad 1d0 '(0 128 0))
+    (g:set-fill ctx grad)
+    (g:fill-rect ctx 0 0 60 60))
+  (ok "radial centre is inner colour" (color-near (px ctx 30 30) '(255 255 0)))
+  (ok "radial edge is outer colour"   (let ((c (px ctx 58 30)))   ; greenish, not the yellow centre
+                                        (and (< (first c) 60) (> (second c) 90) (< (third c) 40)))))
+
+;;; an RGBA canvas tracks alpha: a half-alpha fill, then clearRect punches a hole
+(let ((ctx (g:make-context 20 20 :alpha t)))
+  (g:set-fill ctx '(255 0 0)) (g:set-global-alpha ctx 0.5d0)
+  (g:fill-rect ctx 0 0 20 20)
+  (g:set-global-alpha ctx 1d0)
+  (g:clear-rect ctx 5 5 10 10)
+  (let* ((cv (g:context-canvas ctx)) (ap (s:canvas-alpha cv)))
+    (ok "rgba half-alpha fill records ~50% alpha" (near (aref ap 0) 128 8))
+    (ok "clearRect zeroes alpha" (= (aref ap (+ (* 10 20) 10)) 0))))
+
 (format t "~&gesso self-test: ~a passed, ~a failed~%" *pass* *fail*)
 (when (plusp *fail*) (uiop:quit 1))

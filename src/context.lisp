@@ -33,11 +33,18 @@
   (cur-user nil)          ; current point in USER space (for curve starts)
   (clear-color '(255 255 255)))
 
-(defun make-context (width height &key (background '(255 255 255)) canvas)
+(defun make-context (width height &key (background '(255 255 255)) canvas alpha)
   "A 2D context over a new scribe canvas WIDTH x HEIGHT (filled BACKGROUND), or
-   over an existing scribe CANVAS when supplied (the weft integration path)."
-  (%make-context :canvas (or canvas (scribe:make-canvas width height background))
+   over an existing scribe CANVAS when supplied (the weft integration path).  When
+   ALPHA is true (and no CANVAS is given) the surface is a transparent RGBA canvas,
+   so clearRect and semi-transparent fills composite correctly onto the page."
+  (%make-context :canvas (or canvas (if alpha (scribe:make-rgba-canvas width height)
+                                        (scribe:make-canvas width height background)))
                  :clear-color background))
+
+(defun %paint-inv (ctx paint)
+  "The inverse CTM for evaluating a gradient PAINT, or NIL for a solid colour."
+  (when (gradient-p paint) (mat-invert (ctm ctx))))
 
 (defun context-width (ctx) (scribe:canvas-width (context-canvas ctx)))
 (defun context-height (ctx) (scribe:canvas-height (context-canvas ctx)))
@@ -128,12 +135,14 @@
 (defun fill-path (ctx)
   (let ((s (context-state ctx)))
     (fill-subpaths (context-canvas ctx) (context-subpaths ctx)
-                   (gstate-fill-color s) (gstate-global-alpha s))))
+                   (gstate-fill-color s) (gstate-global-alpha s)
+                   (%paint-inv ctx (gstate-fill-color s)))))
 
 (defun stroke-path (ctx)
   (let ((s (context-state ctx)))
     (stroke-subpaths (context-canvas ctx) (context-subpaths ctx)
-                     (gstate-stroke-color s) (gstate-line-width s) (gstate-global-alpha s))))
+                     (gstate-stroke-color s) (gstate-line-width s) (gstate-global-alpha s)
+                     (%paint-inv ctx (gstate-stroke-color s)))))
 
 (defun %rect-subpath (ctx x y w h)
   (let ((sp (make-subpath)) (m (ctm ctx)))
@@ -144,26 +153,49 @@
 (defun fill-rect (ctx x y w h)
   (let ((s (context-state ctx)))
     (fill-subpaths (context-canvas ctx) (list (%rect-subpath ctx x y w h))
-                   (gstate-fill-color s) (gstate-global-alpha s))))
+                   (gstate-fill-color s) (gstate-global-alpha s)
+                   (%paint-inv ctx (gstate-fill-color s)))))
 
 (defun stroke-rect (ctx x y w h)
   (let ((s (context-state ctx)))
     (stroke-subpaths (context-canvas ctx) (list (%rect-subpath ctx x y w h))
-                     (gstate-stroke-color s) (gstate-line-width s) (gstate-global-alpha s))))
+                     (gstate-stroke-color s) (gstate-line-width s) (gstate-global-alpha s)
+                     (%paint-inv ctx (gstate-stroke-color s)))))
 
 (defun clear-rect (ctx x y w h)
-  "Reset the rectangle to the canvas's clear colour (opaque model: no alpha)."
-  (fill-subpaths (context-canvas ctx) (list (%rect-subpath ctx x y w h))
-                 (context-clear-color ctx) 1d0))
+  "Erase the rectangle.  On an RGBA canvas the pixels become transparent black; on
+   an opaque canvas they reset to the clear colour."
+  (let ((cv (context-canvas ctx)))
+    (if (scribe:canvas-alpha cv)
+        (%clear-rgba-rect ctx x y w h)
+        (fill-subpaths cv (list (%rect-subpath ctx x y w h))
+                       (context-clear-color ctx) 1d0))))
+
+(defun %clear-rgba-rect (ctx x y w h)
+  "Zero the RGBA canvas over the device bounding box of user rect (X,Y,W,H)."
+  (let* ((cv (context-canvas ctx)) (m (ctm ctx))
+         (cw (scribe:canvas-width cv)) (ch (scribe:canvas-height cv))
+         (px (scribe:canvas-pixels cv)) (ap (scribe:canvas-alpha cv))
+         (xs '()) (ys '()))
+    (dolist (corner (list (cons x y) (cons (+ x w) y) (cons (+ x w) (+ y h)) (cons x (+ y h))))
+      (multiple-value-bind (dx dy) (mat-apply m (car corner) (cdr corner))
+        (push dx xs) (push dy ys)))
+    (let ((x0 (max 0 (floor (reduce #'min xs)))) (x1 (min cw (ceiling (reduce #'max xs))))
+          (y0 (max 0 (floor (reduce #'min ys)))) (y1 (min ch (ceiling (reduce #'max ys)))))
+      (loop for py from y0 below y1 do
+        (loop for pxi from x0 below x1 do
+          (let ((j (+ (* py cw) pxi)))
+            (setf (aref ap j) 0
+                  (aref px (* 3 j)) 0 (aref px (+ (* 3 j) 1)) 0 (aref px (+ (* 3 j) 2)) 0)))))))
 
 (defun fill-text (ctx text x y)
   (let ((s (context-state ctx)))
-    (draw-text* ctx text x y (gstate-fill-color s) (gstate-global-alpha s))))
+    (draw-text* ctx text x y (paint->solid (gstate-fill-color s)) (gstate-global-alpha s))))
 
 (defun stroke-text (ctx text x y)
   ;; a filled outline in the stroke colour approximates stroked text for now
   (let ((s (context-state ctx)))
-    (draw-text* ctx text x y (gstate-stroke-color s) (gstate-global-alpha s))))
+    (draw-text* ctx text x y (paint->solid (gstate-stroke-color s)) (gstate-global-alpha s))))
 
 (defun measure-text (ctx text) (text-width ctx text))
 

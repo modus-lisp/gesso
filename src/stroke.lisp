@@ -23,8 +23,9 @@
   (%quad-subpath (- cx hw) (- cy hw) (- cx hw) (+ cy hw)
                  (+ cx hw) (+ cy hw) (+ cx hw) (- cy hw)))
 
-(defun stroke-subpaths (cv subpaths color line-width alpha)
-  "Stroke SUBPATHS (device-space polylines) onto scribe canvas CV."
+(defun stroke-subpaths (cv subpaths paint line-width alpha &optional inv)
+  "Stroke SUBPATHS (device-space polylines) onto scribe canvas CV with PAINT (a
+   solid colour or a GRADIENT evaluated through the inverse CTM INV)."
   (let ((hw (max 0.35d0 (* 0.5d0 (df line-width)))) (rects '()))
     (dolist (sp subpaths)
       (let* ((pts (subpath-points sp)) (n (length pts)))
@@ -46,4 +47,4 @@
             (loop for i from (if (subpath-closed sp) 0 1) below (if (subpath-closed sp) n (1- n))
                   for p = (aref pts i)
                   do (push (%square-subpath (car p) (cdr p) hw) rects))))))
-    (when rects (fill-subpaths cv rects color alpha))))
+    (when rects (fill-subpaths cv rects paint alpha inv))))

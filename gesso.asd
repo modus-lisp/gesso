@@ -15,6 +15,7 @@ The drawing engine behind an HTML canvas 2D context.  No FFI, no Cairo, no Skia.
     :components
     ((:file "packages")
      (:file "matrix")     ; 2D affine transforms (a b c d e f)
+     (:file "paint")      ; gradient paint sources (linear/radial)
      (:file "path")       ; path building + curve/arc flattening
      (:file "raster")     ; contour -> coverage -> canvas (fill blitter)
      (:file "stroke")     ; stroke a polyline into a fill outline

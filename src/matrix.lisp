@@ -36,6 +36,17 @@
   (let ((c (cos (df radians))) (s (sin (df radians))))
     (list c s (- s) c 0d0 0d0)))
 
+(defun mat-invert (m)
+  "The inverse of affine M, or NIL if singular.  Maps device points back to the
+   user space M was built in (used to evaluate a paint at a device pixel)."
+  (destructuring-bind (a b c d e f) m
+    (let ((det (- (* a d) (* b c))))
+      (when (> (abs det) 1d-12)
+        (let ((ia (/ d det)) (ib (/ (- b) det)) (ic (/ (- c) det)) (id (/ a det)))
+          (list ia ib ic id
+                (- (+ (* ia e) (* ic f)))
+                (- (+ (* ib e) (* id f)))))))))
+
 (defun mat-mean-scale (m)
   "A scalar approximating M's linear scale — the geometric mean of the two axis
    lengths.  Used to pick a rasterization ppem for text under a scaled transform."
