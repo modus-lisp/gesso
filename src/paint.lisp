@@ -23,8 +23,12 @@
   "Add a colour stop at OFFSET (0..1) with COLOR (r g b) and ALPHA, keeping the
    stop list sorted by offset."
   (let ((stop (list (df offset) (first color) (second color) (third color) (df alpha))))
+    ;; Append (not prepend) before the stable sort so that stops sharing an offset —
+    ;; a hard colour stop, e.g. `red 50%, blue 50%` — keep their insertion order.
+    ;; Prepending would let a later equal-offset stop sort ahead of an earlier one,
+    ;; inverting the hard transition.
     (setf (gradient-stops grad)
-          (stable-sort (cons stop (gradient-stops grad)) #'< :key #'first)))
+          (stable-sort (append (gradient-stops grad) (list stop)) #'< :key #'first)))
   grad)
 
 (defun paint->solid (paint)
