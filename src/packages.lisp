@@ -8,6 +8,7 @@
    ;; state stack + drawing state
    #:save #:restore
    #:set-fill #:set-stroke #:set-line-width #:set-global-alpha #:set-font
+   #:set-fill-rule #:clip
    ;; transforms
    #:translate #:scale #:rotate #:transform #:set-transform #:reset-transform
    ;; path building

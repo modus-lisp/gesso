@@ -15,14 +15,17 @@
   (font-size 10d0)
   (font-weight 400)
   (font-style :normal)
-  (font-family nil))
+  (font-family nil)
+  (fill-rule :nonzero)
+  (clip nil))            ; device-space coverage mask (intersection of clips), or NIL
 
 (defun copy-state (s)
   (make-gstate :transform (copy-list (gstate-transform s))
                :fill-color (gstate-fill-color s) :stroke-color (gstate-stroke-color s)
                :line-width (gstate-line-width s) :global-alpha (gstate-global-alpha s)
                :font-size (gstate-font-size s) :font-weight (gstate-font-weight s)
-               :font-style (gstate-font-style s) :font-family (gstate-font-family s)))
+               :font-style (gstate-font-style s) :font-family (gstate-font-family s)
+               :fill-rule (gstate-fill-rule s) :clip (gstate-clip s)))
 
 (defstruct (context (:constructor %make-context))
   canvas
@@ -65,6 +68,11 @@
   (let ((s (context-state ctx)))
     (setf (gstate-font-size s) (df size) (gstate-font-family s) family
           (gstate-font-weight s) weight (gstate-font-style s) style)))
+(defun set-fill-rule (ctx rule)
+  "RULE is :nonzero or :evenodd (accepts the strings \"nonzero\"/\"evenodd\")."
+  (setf (gstate-fill-rule (context-state ctx))
+        (if (or (eq rule :evenodd) (and (stringp rule) (string-equal rule "evenodd")))
+            :evenodd :nonzero)))
 
 ;;; ---- transforms -----------------------------------------------------------
 (defun %concat (ctx local)
@@ -131,15 +139,32 @@
 (defun close-path (ctx)
   (when (context-open ctx) (setf (subpath-closed (context-open ctx)) t)))
 
+;;; ---- clipping -------------------------------------------------------------
+(defun clip (ctx &optional fill-rule)
+  "Intersect the current clip region with the fill of the current path (FILL-RULE
+   :nonzero (default) or :evenodd), so subsequent paint is confined to it."
+  (let* ((s (context-state ctx)) (cv (context-canvas ctx))
+         (cw (scribe:canvas-width cv)) (ch (scribe:canvas-height cv))
+         (m (subpaths-coverage-mask cw ch (context-subpaths ctx)
+                                    (or fill-rule (gstate-fill-rule s))))
+         (old (gstate-clip s)))
+    (setf (gstate-clip s)
+          (if old
+              (let ((r (make-array (* cw ch) :element-type 'double-float)))
+                (dotimes (i (* cw ch) r) (setf (aref r i) (* (aref old i) (aref m i)))))
+              m))))
+
 ;;; ---- painting -------------------------------------------------------------
 (defun fill-path (ctx)
-  (let ((s (context-state ctx)))
+  (let ((s (context-state ctx))
+        (*clip-mask* (gstate-clip (context-state ctx))))
     (fill-subpaths (context-canvas ctx) (context-subpaths ctx)
                    (gstate-fill-color s) (gstate-global-alpha s)
-                   (%paint-inv ctx (gstate-fill-color s)))))
+                   (%paint-inv ctx (gstate-fill-color s)) (gstate-fill-rule s))))
 
 (defun stroke-path (ctx)
-  (let ((s (context-state ctx)))
+  (let ((s (context-state ctx))
+        (*clip-mask* (gstate-clip (context-state ctx))))
     (stroke-subpaths (context-canvas ctx) (context-subpaths ctx)
                      (gstate-stroke-color s) (gstate-line-width s) (gstate-global-alpha s)
                      (%paint-inv ctx (gstate-stroke-color s)))))
@@ -151,7 +176,8 @@
     sp))
 
 (defun fill-rect (ctx x y w h)
-  (let ((s (context-state ctx)))
+  (let ((s (context-state ctx))
+        (*clip-mask* (gstate-clip (context-state ctx))))
     (fill-subpaths (context-canvas ctx) (list (%rect-subpath ctx x y w h))
                    (gstate-fill-color s) (gstate-global-alpha s)
                    (%paint-inv ctx (gstate-fill-color s)))))

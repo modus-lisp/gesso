@@ -44,40 +44,115 @@
               (values (reduce #'min xs) (reduce #'min ys)
                       (reduce #'max xs) (reduce #'max ys))))))))
 
+(defvar *clip-mask* nil
+  "When bound to a device-space coverage array (canvas-width*canvas-height doubles,
+   0..1), every fill/stroke coverage is multiplied by it — the intersection of the
+   active clip regions (SVG clip-path / canvas clip()).  NIL = no clip.")
+
+(defun %clip-at (px py cv)
+  "The active clip coverage at device pixel (PX,PY), or 1d0 when unclipped."
+  (if *clip-mask*
+      (let ((cw (scribe:canvas-width cv)) (ch (scribe:canvas-height cv)))
+        (if (and (>= px 0) (< px cw) (>= py 0) (< py ch))
+            (aref *clip-mask* (+ (* py cw) px))
+            0d0))
+      1d0))
+
 (defun %blit-coverage (cv cov w h ix0 iy0 paint alpha inv)
   "Composite coverage bitmap COV (w*h) at device origin (IX0,IY0) with PAINT scaled
    by ALPHA in [0,1].  PAINT is a solid (r g b) list or a GRADIENT; a gradient is
    evaluated per pixel by mapping the device point back through INV (the inverse of
-   the transform in force at paint time), folding the stop alpha into coverage."
+   the transform in force at paint time), folding the stop alpha into coverage.
+   Coverage is intersected with the active *CLIP-MASK* (if any)."
   (let ((a (df alpha)))
     (if (gradient-p paint)
         (dotimes (yy h)
           (let ((py (+ iy0 yy)) (row (* yy w)))
             (dotimes (xx w)
-              (let ((c (aref cov (+ row xx))))
+              (let* ((px (+ ix0 xx))
+                     (c (* (aref cov (+ row xx)) (%clip-at px py cv))))
                 (when (> c 0d0)
-                  (multiple-value-bind (ux uy) (mat-apply inv (+ ix0 xx 0.5d0) (+ py 0.5d0))
+                  (multiple-value-bind (ux uy) (mat-apply inv (+ px 0.5d0) (+ py 0.5d0))
                     (multiple-value-bind (r g b sa) (gradient-color-at paint ux uy)
                       (when (> sa 0d0)
-                        (scribe:blend-coverage cv (+ ix0 xx) py (* c a sa) (list r g b))))))))))
+                        (scribe:blend-coverage cv px py (* c a sa) (list r g b))))))))))
         (dotimes (yy h)
           (let ((py (+ iy0 yy)) (row (* yy w)))
             (dotimes (xx w)
-              (let ((c (aref cov (+ row xx))))
+              (let* ((px (+ ix0 xx))
+                     (c (* (aref cov (+ row xx)) (%clip-at px py cv))))
                 (when (> c 0d0)
-                  (scribe:blend-coverage cv (+ ix0 xx) py (* c a) paint)))))))))
+                  (scribe:blend-coverage cv px py (* c a) paint)))))))))
 
-(defun fill-subpaths (cv subpaths paint alpha &optional inv)
-  "Non-zero-winding fill of SUBPATHS onto scribe canvas CV with PAINT and ALPHA.
-   PAINT is a solid colour or a GRADIENT (evaluated through INV, the inverse CTM)."
-  (multiple-value-bind (minx miny) (%paths-bbox subpaths)
+(defun %evenodd-coverage (subpaths)
+  "(values COV W H IX0 IY0): even-odd combined coverage over the union bbox of
+   SUBPATHS.  Each subpath is rasterized independently (its non-zero interior) in a
+   frame anchored at the union top-left, then XOR-combined (a+b-2ab) so overlapping
+   interiors cancel — the even-odd rule for non-self-intersecting subpaths."
+  (multiple-value-bind (minx miny maxx maxy) (%paths-bbox subpaths)
     (when minx
       (let* ((ix0 (floor minx)) (iy0 (floor miny))
-             (contours (loop for sp in subpaths
-                             for c = (%subpath-contour sp)
-                             when c collect c)))
-        (when contours
-          (multiple-value-bind (cov w h)
-              (scribe:rasterize-outline contours 1d0
-                                        :origin-x (df ix0) :origin-y (df (- iy0)))
-            (when cov (%blit-coverage cv cov w h ix0 iy0 paint alpha inv))))))))
+             (w (max 1 (+ 2 (ceiling (- maxx ix0)))))
+             (h (max 1 (+ 2 (ceiling (- maxy iy0)))))
+             (acc (make-array (* w h) :element-type 'double-float :initial-element 0d0)))
+        (dolist (sp subpaths)
+          (let ((c (%subpath-contour sp)))
+            (when c
+              (multiple-value-bind (cov cw ch)
+                  (scribe:rasterize-outline (list c) 1d0
+                                            :origin-x (df ix0) :origin-y (df (- iy0)))
+                (when cov
+                  (dotimes (yy (min ch h))
+                    (dotimes (xx (min cw w))
+                      (let* ((idx (+ (* yy w) xx))
+                             (a (aref acc idx)) (v (aref cov (+ (* yy cw) xx))))
+                        (setf (aref acc idx) (+ a v (* -2d0 a v)))))))))))
+        (values acc w h ix0 iy0)))))
+
+(defun fill-subpaths (cv subpaths paint alpha &optional inv fill-rule)
+  "Fill SUBPATHS onto scribe canvas CV with PAINT and ALPHA.  PAINT is a solid
+   colour or a GRADIENT (evaluated through INV, the inverse CTM).  FILL-RULE is
+   :nonzero (default) or :evenodd."
+  (if (eq fill-rule :evenodd)
+      (multiple-value-bind (cov w h ix0 iy0) (%evenodd-coverage subpaths)
+        (when cov (%blit-coverage cv cov w h ix0 iy0 paint alpha inv)))
+      (multiple-value-bind (minx miny) (%paths-bbox subpaths)
+        (when minx
+          (let* ((ix0 (floor minx)) (iy0 (floor miny))
+                 (contours (loop for sp in subpaths
+                                 for c = (%subpath-contour sp)
+                                 when c collect c)))
+            (when contours
+              (multiple-value-bind (cov w h)
+                  (scribe:rasterize-outline contours 1d0
+                                            :origin-x (df ix0) :origin-y (df (- iy0)))
+                (when cov (%blit-coverage cv cov w h ix0 iy0 paint alpha inv)))))))))
+
+(defun subpaths-coverage-mask (cw ch subpaths &optional (fill-rule :nonzero))
+  "A CW*CH device-space coverage mask (double 0..1) for the FILL of SUBPATHS — the
+   region a clip() would keep.  FILL-RULE is :nonzero or :evenodd."
+  (let ((mask (make-array (* cw ch) :element-type 'double-float :initial-element 0d0)))
+    (flet ((stamp (cov w h ix0 iy0)
+             (when cov
+               (dotimes (yy h)
+                 (let ((py (+ iy0 yy)))
+                   (when (and (>= py 0) (< py ch))
+                     (dotimes (xx w)
+                       (let ((px (+ ix0 xx)))
+                         (when (and (>= px 0) (< px cw))
+                           (setf (aref mask (+ (* py cw) px))
+                                 (aref cov (+ (* yy w) xx))))))))))))
+      (if (eq fill-rule :evenodd)
+          (multiple-value-bind (cov w h ix0 iy0) (%evenodd-coverage subpaths)
+            (stamp cov w h ix0 iy0))
+          (multiple-value-bind (minx miny) (%paths-bbox subpaths)
+            (when minx
+              (let* ((ix0 (floor minx)) (iy0 (floor miny))
+                     (contours (loop for sp in subpaths for c = (%subpath-contour sp)
+                                     when c collect c)))
+                (when contours
+                  (multiple-value-bind (cov w h)
+                      (scribe:rasterize-outline contours 1d0
+                                                :origin-x (df ix0) :origin-y (df (- iy0)))
+                    (stamp cov w h ix0 iy0))))))))
+    mask))
