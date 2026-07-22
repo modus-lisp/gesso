@@ -17,6 +17,8 @@
   (font-style :normal)
   (font-family nil)
   (fill-rule :nonzero)
+  (line-dash nil)        ; stroke dash pattern (list of lengths) or NIL
+  (line-dash-offset 0d0)
   (clip nil))            ; device-space coverage mask (intersection of clips), or NIL
 
 (defun copy-state (s)
@@ -25,7 +27,8 @@
                :line-width (gstate-line-width s) :global-alpha (gstate-global-alpha s)
                :font-size (gstate-font-size s) :font-weight (gstate-font-weight s)
                :font-style (gstate-font-style s) :font-family (gstate-font-family s)
-               :fill-rule (gstate-fill-rule s) :clip (gstate-clip s)))
+               :fill-rule (gstate-fill-rule s) :clip (gstate-clip s)
+               :line-dash (gstate-line-dash s) :line-dash-offset (gstate-line-dash-offset s)))
 
 (defstruct (context (:constructor %make-context))
   canvas
@@ -73,6 +76,11 @@
   (setf (gstate-fill-rule (context-state ctx))
         (if (or (eq rule :evenodd) (and (stringp rule) (string-equal rule "evenodd")))
             :evenodd :nonzero)))
+(defun set-line-dash (ctx segments &optional (offset 0d0))
+  "SEGMENTS is a list of dash lengths (empty/NIL = solid); OFFSET is the phase."
+  (let ((s (context-state ctx)))
+    (setf (gstate-line-dash s) (and segments (mapcar #'df segments))
+          (gstate-line-dash-offset s) (df offset))))
 
 ;;; ---- transforms -----------------------------------------------------------
 (defun %concat (ctx local)
@@ -167,7 +175,8 @@
         (*clip-mask* (gstate-clip (context-state ctx))))
     (stroke-subpaths (context-canvas ctx) (context-subpaths ctx)
                      (gstate-stroke-color s) (gstate-line-width s) (gstate-global-alpha s)
-                     (%paint-inv ctx (gstate-stroke-color s)))))
+                     (%paint-inv ctx (gstate-stroke-color s))
+                     (gstate-line-dash s) (gstate-line-dash-offset s))))
 
 (defun %rect-subpath (ctx x y w h)
   (let ((sp (make-subpath)) (m (ctm ctx)))
