@@ -15,7 +15,7 @@
    #:begin-path #:move-to #:line-to #:quadratic-curve-to #:bezier-curve-to
    #:arc #:arc-to #:ellipse #:rect #:close-path
    ;; painting
-   #:fill-path #:stroke-path #:fill-rect #:stroke-rect #:clear-rect
+   #:fill-path #:stroke-path #:fill-rect #:stroke-rect #:clear-rect #:fill-callback
    #:fill-text #:stroke-text #:measure-text #:draw-image #:draw-image-rgba
    ;; paint sources (paint.lisp)
    #:gradient #:gradient-p #:make-linear-gradient #:make-radial-gradient

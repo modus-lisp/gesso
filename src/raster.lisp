@@ -227,6 +227,50 @@
                                             :origin-x (df ix0) :origin-y (df (- iy0)))
                 (when cov (%blit-coverage cv cov w h ix0 iy0 paint alpha inv)))))))))
 
+(defun %clip-bounds (cv clip)
+  "Device bounding box (values X0 Y0 X1 Y1, half-open) of the nonzero region of the
+   coverage array CLIP, or the whole canvas when CLIP is NIL.  Limits a per-pixel
+   paint (a shading) to the clipped area."
+  (let ((cw (scribe:canvas-width cv)) (ch (scribe:canvas-height cv)))
+    (if (null clip)
+        (values 0 0 cw ch)
+        (let ((minx cw) (miny ch) (maxx -1) (maxy -1))
+          (dotimes (y ch)
+            (let ((row (* y cw)))
+              (dotimes (x cw)
+                (when (> (aref clip (+ row x)) 0d0)
+                  (when (< x minx) (setf minx x))
+                  (when (> x maxx) (setf maxx x))
+                  (when (< y miny) (setf miny y))
+                  (when (> y maxy) (setf maxy y))))))
+          (if (>= maxx 0)
+              (values minx miny (1+ maxx) (1+ maxy))
+              (values 0 0 0 0))))))
+
+(defun fill-callback (ctx fn)
+  "Paint a per-pixel colour source across the current clip region: for each device
+   pixel (PX,PY) inside the active clip, call (FN PX PY), which returns either NIL
+   (leave the pixel untouched) or (values R G B ALPHA) with R,G,B 8-bit and ALPHA in
+   0..1.  The result is composited through the SAME chokepoint as fill-path — the
+   clip coverage, the global alpha, the blend mode and the soft mask all apply — so a
+   PDF shading (ISO 32000-1 §8.7.4.5) under a soft mask or blend mode composites
+   correctly.  Iterates only the clip's bounding box."
+  (let* ((s (context-state ctx))
+         (cv (context-canvas ctx))
+         (ga (gstate-global-alpha s))
+         (*clip-mask* (gstate-clip s))
+         (*blend-mode* (gstate-blend-mode s))
+         (*soft-mask* (gstate-soft-mask s)))
+    (multiple-value-bind (x0 y0 x1 y1) (%clip-bounds cv (gstate-clip s))
+      (loop for py from y0 below y1 do
+        (loop for px from x0 below x1 do
+          (let ((cc (%clip-at px py cv)))
+            (when (> cc 0d0)
+              (multiple-value-bind (r g b a) (funcall fn px py)
+                (when (and r a (> (the double-float (df a)) 0d0))
+                  (%composite cv px py (* cc ga (df a)) (list r g b)))))))))
+    (values)))
+
 (defun subpaths-coverage-mask (cw ch subpaths &optional (fill-rule :nonzero))
   "A CW*CH device-space coverage mask (double 0..1) for the FILL of SUBPATHS — the
    region a clip() would keep.  FILL-RULE is :nonzero or :evenodd."
