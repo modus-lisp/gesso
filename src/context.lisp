@@ -292,6 +292,9 @@
            (*clip-mask* (gstate-clip (context-state ctx)))
            (*blend-mode* (gstate-blend-mode (context-state ctx)))
            (*soft-mask* (gstate-soft-mask (context-state ctx)))
+           ;; images composite in device (gamma) space — partial-alpha (SMask /
+           ;; constant-alpha) pixels then match pdfium; opaque pixels are unchanged.
+           (*straight-composite* t)
            (xs '()) (ys '()))
       ;; device bounding box of the mapped unit square
       (dolist (corner '((0d0 . 0d0) (1d0 . 0d0) (1d0 . 1d0) (0d0 . 1d0)))

@@ -62,6 +62,13 @@
    0..1), every composited coverage is multiplied by it — an ExtGState soft mask
    (ISO 32000-1 §11.6.5.2).  NIL = no soft mask.")
 
+(defvar *straight-composite* nil
+  "When true, the :NORMAL / no-soft-mask path composites in DEVICE (gamma) space via
+   %STRAIGHT-OVER instead of scribe's linear-light coverage blend.  Used for image
+   blits, whose partial-alpha (SMask / constant-alpha) pixels must match PDF/pdfium's
+   device-space source-over (§11.3.6).  At full coverage this is byte-identical to the
+   linear path (both yield the source), so opaque images are unchanged.")
+
 (defun %clip-at (px py cv)
   "The active clip coverage at device pixel (PX,PY), or 1d0 when unclipped."
   (if *clip-mask*
@@ -218,7 +225,7 @@
   (declare (type double-float cov))
   (let ((cov (if *soft-mask* (* cov (%mask-at px py cv)) cov)))
     (cond
-      ((and (eq *blend-mode* :normal) (null *soft-mask*))
+      ((and (eq *blend-mode* :normal) (null *soft-mask*) (not *straight-composite*))
        (scribe:blend-coverage cv px py cov color))     ; fast path (byte-identical)
       ((<= cov 0d0) nil)
       (t
