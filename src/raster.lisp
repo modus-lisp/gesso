@@ -354,6 +354,46 @@
                   (%composite cv px py (* cc ga (df a)) (list r g b)))))))))
     (values)))
 
+(defun composite-group (ctx src &optional bx0 by0 bx1 by1)
+  "Composite an offscreen transparency-group context SRC (an RGBA context the same
+   device size as CTX's canvas) onto CTX's canvas as ONE group (ISO 32000-1 §11.4.6):
+   the group's straight colour and alpha are recovered per pixel (SRC holds
+   premultiplied RGB + an alpha plane) and composited through the SAME chokepoint as
+   fill-path — so CTX's current global alpha (the group constant alpha), blend mode,
+   soft mask and clip all apply to the group result exactly once, instead of to each
+   inner mark.  Optional device bounds BX0..BY1 (the group's BBox) restrict the loop."
+  (let* ((s (context-state ctx))
+         (cv (context-canvas ctx))
+         (scv (context-canvas src))
+         (cw (scribe:canvas-width cv)) (ch (scribe:canvas-height cv))
+         (sp (scribe:canvas-pixels scv)) (sa (scribe:canvas-alpha scv))
+         (ga (gstate-global-alpha s))
+         (*clip-mask* (gstate-clip s))
+         (*blend-mode* (gstate-blend-mode s))
+         (*soft-mask* (gstate-soft-mask s))
+         ;; the group is composited in device (gamma) space, like an image blit:
+         ;; partial-alpha edges then match pdfium's source-over (§11.3.6).
+         (*straight-composite* t))
+    (unless (and sa (= cw (scribe:canvas-width scv)) (= ch (scribe:canvas-height scv)))
+      (return-from composite-group (values)))
+    (let ((x0 (max 0 (floor (or bx0 0)))) (y0 (max 0 (floor (or by0 0))))
+          (x1 (min cw (ceiling (or bx1 cw)))) (y1 (min ch (ceiling (or by1 ch)))))
+      (loop for py from y0 below y1 do
+        (loop for px from x0 below x1 do
+          (let* ((j (+ (* py cw) px))
+                 (av (aref sa j)))
+            (when (> av 0)
+              (let* ((af (/ av 255d0))
+                     (i (* 3 j))
+                     ;; un-premultiply premultiplied RGB back to straight colour
+                     (r (min 255 (max 0 (round (/ (aref sp i)       af)))))
+                     (g (min 255 (max 0 (round (/ (aref sp (+ i 1)) af)))))
+                     (b (min 255 (max 0 (round (/ (aref sp (+ i 2)) af)))))
+                     (cov (* af ga (%clip-at px py cv))))
+                (when (> cov 0d0)
+                  (%composite cv px py cov (list r g b)))))))))
+    (values)))
+
 (defun subpaths-coverage-mask (cw ch subpaths &optional (fill-rule :nonzero))
   "A CW*CH device-space coverage mask (double 0..1) for the FILL of SUBPATHS — the
    region a clip() would keep.  FILL-RULE is :nonzero or :evenodd."

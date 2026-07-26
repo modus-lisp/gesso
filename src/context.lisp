@@ -80,6 +80,8 @@
   "Set (or clear, with NIL) the active soft mask: a device-space alpha array
    (canvas-width*canvas-height doubles in 0..1) multiplied into every paint."
   (setf (gstate-soft-mask (context-state ctx)) mask))
+(defun blend-mode (ctx) (gstate-blend-mode (context-state ctx)))
+(defun soft-mask (ctx) (gstate-soft-mask (context-state ctx)))
 (defun set-font (ctx size &key family (weight 400) (style :normal))
   (let ((s (context-state ctx)))
     (setf (gstate-font-size s) (df size) (gstate-font-family s) family
