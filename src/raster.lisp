@@ -49,6 +49,19 @@
    0..1), every fill/stroke coverage is multiplied by it — the intersection of the
    active clip regions (SVG clip-path / canvas clip()).  NIL = no clip.")
 
+(defvar *blend-mode* :normal
+  "Current separable blend mode (ISO 32000-1 §11.3.5 / CSS Compositing 1) applied
+   when compositing a source colour onto the backdrop.  :NORMAL = source-over,
+   byte-identical to the pre-transparency path.  Other values (:multiply :screen
+   :overlay :darken :lighten :color-dodge :color-burn :hard-light :soft-light
+   :difference :exclusion) blend each source channel Cs against the backdrop Cb
+   as B(Cb,Cs) before the over-composite.")
+
+(defvar *soft-mask* nil
+  "When bound to a device-space alpha array (canvas-width*canvas-height doubles,
+   0..1), every composited coverage is multiplied by it — an ExtGState soft mask
+   (ISO 32000-1 §11.6.5.2).  NIL = no soft mask.")
+
 (defun %clip-at (px py cv)
   "The active clip coverage at device pixel (PX,PY), or 1d0 when unclipped."
   (if *clip-mask*
@@ -57,6 +70,92 @@
             (aref *clip-mask* (+ (* py cw) px))
             0d0))
       1d0))
+
+(defun %mask-at (px py cv)
+  "The active soft-mask alpha at device pixel (PX,PY), or 1d0 when unmasked."
+  (if *soft-mask*
+      (let ((cw (scribe:canvas-width cv)) (ch (scribe:canvas-height cv)))
+        (if (and (>= px 0) (< px cw) (>= py 0) (< py ch))
+            (aref *soft-mask* (+ (* py cw) px))
+            0d0))
+      1d0))
+
+(defun %blend-sep (mode cb cs)
+  "Separable blend of one backdrop channel CB with source channel CS (8-bit 0..255),
+   per ISO 32000-1 §11.3.5 (the same formulas as CSS Compositing 1)."
+  (declare (type (unsigned-byte 8) cb cs))
+  (ecase mode
+    (:multiply    (truncate (* cb cs) 255))
+    (:screen      (- 255 (truncate (* (- 255 cb) (- 255 cs)) 255)))
+    (:overlay     (if (< cb 128) (truncate (* 2 cb cs) 255)
+                      (- 255 (truncate (* 2 (- 255 cb) (- 255 cs)) 255))))
+    (:darken      (min cb cs))
+    (:lighten     (max cb cs))
+    (:color-dodge (cond ((= cb 0) 0) ((= cs 255) 255)
+                        (t (min 255 (truncate (* 255 cb) (- 255 cs))))))
+    (:color-burn  (cond ((= cb 255) 255) ((= cs 0) 0)
+                        (t (- 255 (min 255 (truncate (* 255 (- 255 cb)) cs))))))
+    (:hard-light  (if (< cs 128) (truncate (* 2 cs cb) 255)
+                      (- 255 (truncate (* 2 (- 255 cs) (- 255 cb)) 255))))
+    (:soft-light  (let ((b (/ cb 255d0)) (s (/ cs 255d0)))
+                    (let ((res (if (<= s 0.5d0)
+                                   (- b (* (- 1d0 (* 2d0 s)) b (- 1d0 b)))
+                                   (let ((d (if (<= b 0.25d0)
+                                                (* (- (* 16d0 b) 12d0) (+ (* b b) b))
+                                                (sqrt b))))
+                                     (+ b (* (- (* 2d0 s) 1d0) (- d b)))))))
+                      (min 255 (max 0 (round (* 255d0 res)))))))
+    (:difference  (abs (- cb cs)))
+    (:exclusion   (- (+ cb cs) (truncate (* 2 cb cs) 255)))))
+
+(defun %blend-backdrop (cv px py color)
+  "COLOR (source r g b) blended channel-wise against the canvas backdrop at (PX,PY)
+   under *BLEND-MODE*, returning the blended (r g b) to be over-composited.  Reads
+   the opaque RGB backdrop directly (folio's page canvas)."
+  (let ((cw (scribe:canvas-width cv)) (ch (scribe:canvas-height cv)))
+    (if (and (>= px 0) (< px cw) (>= py 0) (< py ch))
+        (let* ((p (scribe:canvas-pixels cv))
+               (i (* 3 (+ (* py cw) px))))
+          (list (%blend-sep *blend-mode* (aref p i)       (first color))
+                (%blend-sep *blend-mode* (aref p (+ i 1)) (second color))
+                (%blend-sep *blend-mode* (aref p (+ i 2)) (third color))))
+        color)))
+
+(defun %straight-over (cv px py cov src)
+  "Straight (device-space, non-linear) source-over of SRC (r g b) at coverage COV
+   onto the opaque RGB canvas: C = (1-COV)*backdrop + COV*SRC per 8-bit channel.
+   This matches how PDF/pdfium composite a soft-masked or blended mark (ISO 32000-1
+   §11.3.6), rather than scribe's linear-light coverage blend."
+  (declare (type double-float cov))
+  (let ((cw (scribe:canvas-width cv)) (ch (scribe:canvas-height cv)))
+    (when (and (>= px 0) (< px cw) (>= py 0) (< py ch))
+      (let* ((p (scribe:canvas-pixels cv))
+             (i (* 3 (+ (* py cw) px)))
+             (k (max 0d0 (min 1d0 cov))) (ik (- 1d0 k)))
+        (flet ((mix (bg fg) (max 0 (min 255 (round (+ (* ik bg) (* k fg)))))))
+          (setf (aref p i)       (mix (aref p i)       (first src))
+                (aref p (+ i 1)) (mix (aref p (+ i 1)) (second src))
+                (aref p (+ i 2)) (mix (aref p (+ i 2)) (third src))))))))
+
+(declaim (inline %composite))
+(defun %composite (cv px py cov color)
+  "Composite COLOR at device pixel (PX,PY) with coverage COV, honouring *SOFT-MASK*
+   (multiplies coverage) and *BLEND-MODE* (blends the source against the backdrop
+   before the over-composite).  With NO mask and :NORMAL mode this is exactly
+   SCRIBE:BLEND-COVERAGE — byte-identical to the pre-transparency path.  When a soft
+   mask or a non-normal blend mode is active, the mark is composited in device space
+   (straight source-over) to match PDF/pdfium transparency."
+  (declare (type double-float cov))
+  (let ((cov (if *soft-mask* (* cov (%mask-at px py cv)) cov)))
+    (cond
+      ((and (eq *blend-mode* :normal) (null *soft-mask*))
+       (scribe:blend-coverage cv px py cov color))     ; fast path (byte-identical)
+      ((<= cov 0d0) nil)
+      (t
+       (let ((src (if (eq *blend-mode* :normal) color (%blend-backdrop cv px py color))))
+         (if (scribe:canvas-alpha cv)
+             (scribe:blend-coverage cv px py cov src)   ; RGBA surface (weft): keep as-is
+             (%straight-over cv px py cov src)))))))
 
 (defun %blit-coverage (cv cov w h ix0 iy0 paint alpha inv)
   "Composite coverage bitmap COV (w*h) at device origin (IX0,IY0) with PAINT scaled
@@ -75,14 +174,14 @@
                   (multiple-value-bind (ux uy) (mat-apply inv (+ px 0.5d0) (+ py 0.5d0))
                     (multiple-value-bind (r g b sa) (gradient-color-at paint ux uy)
                       (when (> sa 0d0)
-                        (scribe:blend-coverage cv px py (* c a sa) (list r g b))))))))))
+                        (%composite cv px py (* c a sa) (list r g b))))))))))
         (dotimes (yy h)
           (let ((py (+ iy0 yy)) (row (* yy w)))
             (dotimes (xx w)
               (let* ((px (+ ix0 xx))
                      (c (* (aref cov (+ row xx)) (%clip-at px py cv))))
                 (when (> c 0d0)
-                  (scribe:blend-coverage cv px py (* c a) paint)))))))))
+                  (%composite cv px py (* c a) paint)))))))))
 
 (defun %evenodd-coverage (subpaths)
   "(values COV W H IX0 IY0): even-odd combined coverage over the union bbox of

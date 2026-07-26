@@ -19,7 +19,9 @@
   (fill-rule :nonzero)
   (line-dash nil)        ; stroke dash pattern (list of lengths) or NIL
   (line-dash-offset 0d0)
-  (clip nil))            ; device-space coverage mask (intersection of clips), or NIL
+  (clip nil)             ; device-space coverage mask (intersection of clips), or NIL
+  (blend-mode :normal)   ; separable blend mode (§11.3.5); :normal = source-over
+  (soft-mask nil))       ; device-space alpha mask (§11.6.5.2), or NIL
 
 (defun copy-state (s)
   (make-gstate :transform (copy-list (gstate-transform s))
@@ -28,7 +30,8 @@
                :font-size (gstate-font-size s) :font-weight (gstate-font-weight s)
                :font-style (gstate-font-style s) :font-family (gstate-font-family s)
                :fill-rule (gstate-fill-rule s) :clip (gstate-clip s)
-               :line-dash (gstate-line-dash s) :line-dash-offset (gstate-line-dash-offset s)))
+               :line-dash (gstate-line-dash s) :line-dash-offset (gstate-line-dash-offset s)
+               :blend-mode (gstate-blend-mode s) :soft-mask (gstate-soft-mask s)))
 
 (defstruct (context (:constructor %make-context))
   canvas
@@ -70,6 +73,13 @@
 (defun set-stroke (ctx color) (setf (gstate-stroke-color (context-state ctx)) color))
 (defun set-line-width (ctx w) (setf (gstate-line-width (context-state ctx)) (df w)))
 (defun set-global-alpha (ctx a) (setf (gstate-global-alpha (context-state ctx)) (max 0d0 (min 1d0 (df a)))))
+(defun set-blend-mode (ctx mode)
+  "Set the current separable blend mode (a keyword; :NORMAL = source-over)."
+  (setf (gstate-blend-mode (context-state ctx)) (or mode :normal)))
+(defun set-soft-mask (ctx mask)
+  "Set (or clear, with NIL) the active soft mask: a device-space alpha array
+   (canvas-width*canvas-height doubles in 0..1) multiplied into every paint."
+  (setf (gstate-soft-mask (context-state ctx)) mask))
 (defun set-font (ctx size &key family (weight 400) (style :normal))
   (let ((s (context-state ctx)))
     (setf (gstate-font-size s) (df size) (gstate-font-family s) family
@@ -167,15 +177,19 @@
 
 ;;; ---- painting -------------------------------------------------------------
 (defun fill-path (ctx)
-  (let ((s (context-state ctx))
-        (*clip-mask* (gstate-clip (context-state ctx))))
+  (let* ((s (context-state ctx))
+         (*clip-mask* (gstate-clip s))
+         (*blend-mode* (gstate-blend-mode s))
+         (*soft-mask* (gstate-soft-mask s)))
     (fill-subpaths (context-canvas ctx) (context-subpaths ctx)
                    (gstate-fill-color s) (gstate-global-alpha s)
                    (%paint-inv ctx (gstate-fill-color s)) (gstate-fill-rule s))))
 
 (defun stroke-path (ctx)
-  (let ((s (context-state ctx))
-        (*clip-mask* (gstate-clip (context-state ctx))))
+  (let* ((s (context-state ctx))
+         (*clip-mask* (gstate-clip s))
+         (*blend-mode* (gstate-blend-mode s))
+         (*soft-mask* (gstate-soft-mask s)))
     (stroke-subpaths (context-canvas ctx) (context-subpaths ctx)
                      (gstate-stroke-color s) (gstate-line-width s) (gstate-global-alpha s)
                      (%paint-inv ctx (gstate-stroke-color s))
@@ -276,6 +290,8 @@
            (cw (scribe:canvas-width cv)) (ch (scribe:canvas-height cv))
            (ga (gstate-global-alpha (context-state ctx)))
            (*clip-mask* (gstate-clip (context-state ctx)))
+           (*blend-mode* (gstate-blend-mode (context-state ctx)))
+           (*soft-mask* (gstate-soft-mask (context-state ctx)))
            (xs '()) (ys '()))
       ;; device bounding box of the mapped unit square
       (dolist (corner '((0d0 . 0d0) (1d0 . 0d0) (1d0 . 1d0) (0d0 . 1d0)))
@@ -295,7 +311,7 @@
                        (cov (%clip-at pxi py cv))
                        (a (* sa ga cov)))
                   (when (> a 0d0)
-                    (scribe:blend-coverage cv pxi py a
-                                           (list (aref rgba si) (aref rgba (+ si 1))
-                                                 (aref rgba (+ si 2))))))))))))
+                    (%composite cv pxi py a
+                                (list (aref rgba si) (aref rgba (+ si 1))
+                                      (aref rgba (+ si 2))))))))))))
     (values)))
