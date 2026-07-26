@@ -64,6 +64,9 @@
   (when (context-stack ctx) (setf (context-state ctx) (pop (context-stack ctx)))))
 
 (defun set-fill (ctx color) (setf (gstate-fill-color (context-state ctx)) color))
+(defun current-fill (ctx)
+  "The current fill colour as a solid (r g b) list (a stencil mask paints in it)."
+  (paint->solid (gstate-fill-color (context-state ctx))))
 (defun set-stroke (ctx color) (setf (gstate-stroke-color (context-state ctx)) color))
 (defun set-line-width (ctx w) (setf (gstate-line-width (context-state ctx)) (df w)))
 (defun set-global-alpha (ctx a) (setf (gstate-global-alpha (context-state ctx)) (max 0d0 (min 1d0 (df a)))))
@@ -258,3 +261,41 @@
                     (scribe:blend-coverage cv px py a
                                            (list (aref sp i) (aref sp (+ i 1)) (aref sp (+ i 2)))))))))))))
   (values))
+
+(defun draw-image-rgba (ctx rgba iw ih)
+  "Composite a straight-alpha RGBA image (RGBA an (IW*IH*4) octet vector, row 0 at
+   the TOP) onto the canvas.  The image occupies the unit square [0,1]x[0,1] in the
+   CURRENT user space; that square is mapped through the CTM to a device
+   parallelogram (so rotation and skew are handled, not just translate+scale).  For
+   each covered device pixel we inverse-map to (u,v) in the unit square, sample the
+   nearest source texel, and blend it honouring the per-pixel alpha, the global
+   alpha, and the active clip mask."
+  (let* ((m (ctm ctx)) (inv (mat-invert m)))
+    (when (null inv) (return-from draw-image-rgba (values)))
+    (let* ((cv (context-canvas ctx))
+           (cw (scribe:canvas-width cv)) (ch (scribe:canvas-height cv))
+           (ga (gstate-global-alpha (context-state ctx)))
+           (*clip-mask* (gstate-clip (context-state ctx)))
+           (xs '()) (ys '()))
+      ;; device bounding box of the mapped unit square
+      (dolist (corner '((0d0 . 0d0) (1d0 . 0d0) (1d0 . 1d0) (0d0 . 1d0)))
+        (multiple-value-bind (dx dy) (mat-apply m (car corner) (cdr corner))
+          (push dx xs) (push dy ys)))
+      (let ((x0 (max 0 (floor (reduce #'min xs)))) (x1 (min cw (ceiling (reduce #'max xs))))
+            (y0 (max 0 (floor (reduce #'min ys)))) (y1 (min ch (ceiling (reduce #'max ys)))))
+        (loop for py from y0 below y1 do
+          (loop for pxi from x0 below x1 do
+            (multiple-value-bind (u v) (mat-apply inv (+ pxi 0.5d0) (+ py 0.5d0))
+              (when (and (>= u 0d0) (< u 1d0) (>= v 0d0) (< v 1d0))
+                (let* ((sx (min (1- iw) (max 0 (floor (* u iw)))))
+                       ;; v=1 is the TOP of the unit square = image row 0
+                       (sy (min (1- ih) (max 0 (floor (* (- 1d0 v) ih)))))
+                       (si (* 4 (+ (* sy iw) sx)))
+                       (sa (/ (aref rgba (+ si 3)) 255d0))
+                       (cov (%clip-at pxi py cv))
+                       (a (* sa ga cov)))
+                  (when (> a 0d0)
+                    (scribe:blend-coverage cv pxi py a
+                                           (list (aref rgba si) (aref rgba (+ si 1))
+                                                 (aref rgba (+ si 2))))))))))))
+    (values)))
