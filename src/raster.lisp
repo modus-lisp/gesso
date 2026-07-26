@@ -108,17 +108,87 @@
     (:difference  (abs (- cb cs)))
     (:exclusion   (- (+ cb cs) (truncate (* 2 cb cs) 255)))))
 
+;;; ---- non-separable blend modes (ISO 32000-1 §11.3.5.3) --------------------
+;;; Hue / Saturation / Color / Luminosity act on the whole (r g b) triple, not
+;;; channel-by-channel, via the standard Lum / SetLum / Sat / SetSat helpers.
+;;; Triples here are floats in 0..1.
+
+(declaim (inline %nonsep-mode-p))
+(defun %nonsep-mode-p (mode)
+  (case mode ((:hue :saturation :color :luminosity) t) (t nil)))
+
+(defun %lum (c) (+ (* 0.3d0 (first c)) (* 0.59d0 (second c)) (* 0.11d0 (third c))))
+
+(defun %clip-color (c)
+  "Clip an (r g b) triple back into the unit gamut about its luminance (§11.3.5.3)."
+  (let* ((l (%lum c))
+         (r (first c)) (g (second c)) (b (third c))
+         (n (min r g b)) (x (max r g b)))
+    (when (< n 0d0)
+      (flet ((f (v) (if (= l n) l (+ l (/ (* (- v l) l) (- l n))))))
+        (setf r (f r) g (f g) b (f b))))
+    (when (> x 1d0)
+      (flet ((f (v) (if (= x l) l (+ l (/ (* (- v l) (- 1d0 l)) (- x l))))))
+        (setf r (f r) g (f g) b (f b))))
+    (list r g b)))
+
+(defun %set-lum (c l)
+  (let ((d (- l (%lum c))))
+    (%clip-color (list (+ (first c) d) (+ (second c) d) (+ (third c) d)))))
+
+(defun %sat (c) (- (max (first c) (second c) (third c))
+                   (min (first c) (second c) (third c))))
+
+(defun %set-sat (c s)
+  "Set the saturation of triple C to S (§11.3.5.3): min->0, max->s, mid scaled."
+  (let* ((v (make-array 3 :element-type 'double-float
+                          :initial-contents (list (float (first c) 1d0)
+                                                   (float (second c) 1d0)
+                                                   (float (third c) 1d0))))
+         ;; index of min, mid, max (stable for ties)
+         (mn 0) (mx 0))
+    (dotimes (i 3)
+      (when (< (aref v i) (aref v mn)) (setf mn i))
+      (when (> (aref v i) (aref v mx)) (setf mx i)))
+    (when (= mn mx) (setf mx (mod (1+ mn) 3)))     ; all equal: pick any distinct
+    (let ((md (- 3 mn mx)))
+      (when (= md mn) (setf md mx))                ; degenerate guard
+      (if (> (aref v mx) (aref v mn))
+          (progn
+            (setf (aref v md) (/ (* (- (aref v md) (aref v mn)) (float s 1d0))
+                                 (- (aref v mx) (aref v mn))))
+            (setf (aref v mx) (float s 1d0)))
+          (setf (aref v md) 0d0 (aref v mx) 0d0))
+      (setf (aref v mn) 0d0))
+    (list (aref v 0) (aref v 1) (aref v 2))))
+
+(defun %blend-nonsep (mode cb cs)
+  "Non-separable blend of 8-bit backdrop CB with 8-bit source CS -> 8-bit (r g b)."
+  (let ((b (mapcar (lambda (x) (/ x 255d0)) cb))
+        (s (mapcar (lambda (x) (/ x 255d0)) cs)))
+    (let ((res (ecase mode
+                 (:hue        (%set-lum (%set-sat s (%sat b)) (%lum b)))
+                 (:saturation (%set-lum (%set-sat b (%sat s)) (%lum b)))
+                 (:color      (%set-lum s (%lum b)))
+                 (:luminosity (%set-lum b (%lum s))))))
+      (mapcar (lambda (x) (max 0 (min 255 (round (* 255d0 x))))) res))))
+
 (defun %blend-backdrop (cv px py color)
-  "COLOR (source r g b) blended channel-wise against the canvas backdrop at (PX,PY)
-   under *BLEND-MODE*, returning the blended (r g b) to be over-composited.  Reads
-   the opaque RGB backdrop directly (folio's page canvas)."
+  "COLOR (source r g b) blended against the canvas backdrop at (PX,PY) under
+   *BLEND-MODE*, returning the blended (r g b) to be over-composited.  Reads the
+   opaque RGB backdrop directly (folio's page canvas).  Separable modes blend each
+   channel independently; the four non-separable modes blend the whole triple."
   (let ((cw (scribe:canvas-width cv)) (ch (scribe:canvas-height cv)))
     (if (and (>= px 0) (< px cw) (>= py 0) (< py ch))
         (let* ((p (scribe:canvas-pixels cv))
                (i (* 3 (+ (* py cw) px))))
-          (list (%blend-sep *blend-mode* (aref p i)       (first color))
-                (%blend-sep *blend-mode* (aref p (+ i 1)) (second color))
-                (%blend-sep *blend-mode* (aref p (+ i 2)) (third color))))
+          (if (%nonsep-mode-p *blend-mode*)
+              (%blend-nonsep *blend-mode*
+                             (list (aref p i) (aref p (+ i 1)) (aref p (+ i 2)))
+                             color)
+              (list (%blend-sep *blend-mode* (aref p i)       (first color))
+                    (%blend-sep *blend-mode* (aref p (+ i 1)) (second color))
+                    (%blend-sep *blend-mode* (aref p (+ i 2)) (third color)))))
         color)))
 
 (defun %straight-over (cv px py cov src)
@@ -246,6 +316,12 @@
           (if (>= maxx 0)
               (values minx miny (1+ maxx) (1+ maxy))
               (values 0 0 0 0))))))
+
+(defun clip-bounds (ctx)
+  "Device-space bounding box (values X0 Y0 X1 Y1, half-open) of the current clip
+   region, or the whole canvas when unclipped.  Lets a caller (a PDF tiling pattern)
+   know which area it must cover."
+  (%clip-bounds (context-canvas ctx) (gstate-clip (context-state ctx))))
 
 (defun fill-callback (ctx fn)
   "Paint a per-pixel colour source across the current clip region: for each device
