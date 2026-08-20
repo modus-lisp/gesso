@@ -22,6 +22,13 @@
    ;; paint sources (paint.lisp)
    #:gradient #:gradient-p #:make-linear-gradient #:make-radial-gradient
    #:add-color-stop #:gradient-color-at #:paint->solid #:path-user-bounds
+   #:pattern #:pattern-p #:make-pattern #:pattern-tile #:pattern-x #:pattern-y
+   #:pattern-w #:pattern-h #:pattern-inv #:pattern-color-at
+   #:paint-source-p #:paint-color-at
    ;; affine helpers (matrix.lisp)
    #:mat-identity #:mat-mul #:mat-apply #:mat-translate #:mat-scale #:mat-rotate
-   #:mat-invert))
+   #:mat-invert
+   ;; The current transform, so a caller building a tile can ask how many device
+   ;; pixels a user unit is worth and rasterize the tile at the resolution it will
+   ;; actually be shown at.
+   #:ctm))

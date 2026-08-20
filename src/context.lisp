@@ -52,8 +52,8 @@
                  :clear-color background))
 
 (defun %paint-inv (ctx paint)
-  "The inverse CTM for evaluating a gradient PAINT, or NIL for a solid colour."
-  (when (gradient-p paint) (mat-invert (ctm ctx))))
+  "The inverse CTM for evaluating a per-pixel PAINT, or NIL for a solid colour."
+  (when (paint-source-p paint) (mat-invert (ctm ctx))))
 
 (defun context-width (ctx) (scribe:canvas-width (context-canvas ctx)))
 (defun context-height (ctx) (scribe:canvas-height (context-canvas ctx)))

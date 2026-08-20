@@ -241,7 +241,7 @@
    the transform in force at paint time), folding the stop alpha into coverage.
    Coverage is intersected with the active *CLIP-MASK* (if any)."
   (let ((a (df alpha)))
-    (if (gradient-p paint)
+    (if (paint-source-p paint)
         (dotimes (yy h)
           (let ((py (+ iy0 yy)) (row (* yy w)))
             (dotimes (xx w)
@@ -249,7 +249,7 @@
                      (c (* (aref cov (+ row xx)) (%clip-at px py cv))))
                 (when (> c 0d0)
                   (multiple-value-bind (ux uy) (mat-apply inv (+ px 0.5d0) (+ py 0.5d0))
-                    (multiple-value-bind (r g b sa) (gradient-color-at paint ux uy)
+                    (multiple-value-bind (r g b sa) (paint-color-at paint ux uy)
                       (when (> sa 0d0)
                         (%composite cv px py (* c a sa) (list r g b))))))))))
         (dotimes (yy h)

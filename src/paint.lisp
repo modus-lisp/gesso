@@ -31,13 +31,113 @@
           (stable-sort (append (gradient-stops grad) (list stop)) #'< :key #'first)))
   grad)
 
+;;; ---- patterns -------------------------------------------------------------
+;;;
+;;; A PATTERN is a tile of pixels repeated over user space: SVG's <pattern>, and the
+;;; paint source every tiling feature ends up wanting (feTile, feImage, CSS
+;;; background-repeat).  Like a gradient it is evaluated per device pixel through the
+;;; inverse CTM, so it needs no cooperation from the rasterizer beyond being asked.
+;;;
+;;; DEFSTRUCT here and not DEFCLASS, against the house default, for the same reason
+;;; GRADIENT above is one: this is read once per covered pixel — millions of times in a
+;;; full-page fill — and it is a value type with no identity to preserve across a
+;;; redefinition.  That is the measured-hot exception, not a lapse.
+
+(defstruct pattern
+  ;; A scribe RGBA canvas: PREMULTIPLIED rgb + a separate alpha plane.
+  (tile nil)
+  ;; The tile's rectangle in USER space.  Sampling is (u - x) mod w, so x/y matter:
+  ;; a pattern is anchored, not merely periodic.
+  (x 0d0) (y 0d0) (w 1d0) (h 1d0)
+  ;; Inverse of patternTransform, applied to the user point before tiling.  NIL for
+  ;; the common case, so the transform costs nothing when it is not used.
+  (inv nil))
+
+(defun pattern-color-at (pat ux uy)
+  "The (values r g b a) of PAT at user point (UX,UY), a in [0,1] and rgb STRAIGHT —
+   the tile stores premultiplied colour, and the rasterizer wants it unmultiplied
+   because it folds alpha into coverage itself."
+  (let ((tile (pattern-tile pat)))
+    (when (null tile) (return-from pattern-color-at (values 0 0 0 0d0)))
+    (when (pattern-inv pat)
+      (multiple-value-setq (ux uy) (mat-apply (pattern-inv pat) ux uy)))
+    (let* ((tw (pattern-w pat)) (th (pattern-h pat)))
+      (when (or (<= tw 0d0) (<= th 0d0))
+        (return-from pattern-color-at (values 0 0 0 0d0)))
+      (let* ((iw (scribe:canvas-width tile)) (ih (scribe:canvas-height tile))
+             ;; MOD, not REM: a user point left of or above the tile origin has a
+             ;; negative offset, and REM would mirror the tile there instead of
+             ;; repeating it — visible as a seam through the origin and nowhere else.
+             (fx (/ (mod (- ux (pattern-x pat)) tw) tw))
+             (fy (/ (mod (- uy (pattern-y pat)) th) th))
+             ;; BILINEAR, and wrapping at the tile edge.  Nearest-neighbour left every
+             ;; internal edge of the tile aliased against Chromium's filtered sampling —
+             ;; a band of tests all landing 4-8% wrong, which is the shape of "right
+             ;; geometry, wrong sampling".  Wrapping (not clamping) the far tap is what
+             ;; makes the seam between two tiles look like the inside of one.
+             (sx (- (* fx iw) 0.5d0)) (sy (- (* fy ih) 0.5d0))
+             (x0 (floor sx)) (y0 (floor sy))
+             (tx (- sx x0)) (ty (- sy y0))
+             (pix (scribe:canvas-pixels tile))
+             (ap (scribe:canvas-alpha tile)))
+        (macrolet ((tap (xi yi)
+                     `(let ((j (+ (mod ,xi iw) (* (mod ,yi ih) iw))))
+                        (values (aref pix (* 3 j)) (aref pix (+ (* 3 j) 1))
+                                (aref pix (+ (* 3 j) 2))
+                                (if ap (aref ap j) 255)))))
+          (flet ((mix4 (i)
+                   ;; Interpolate in PREMULTIPLIED space, which is the only place it is
+                   ;; correct: blending straight colour across a transparent neighbour
+                   ;; drags that neighbour's meaningless RGB into the result.
+                   (multiple-value-bind (r0 g0 b0 a0) (tap x0 y0)
+                     (multiple-value-bind (r1 g1 b1 a1) (tap (1+ x0) y0)
+                       (multiple-value-bind (r2 g2 b2 a2) (tap x0 (1+ y0))
+                         (multiple-value-bind (r3 g3 b3 a3) (tap (1+ x0) (1+ y0))
+                           (let ((v (list (list r0 g0 b0 a0) (list r1 g1 b1 a1)
+                                          (list r2 g2 b2 a2) (list r3 g3 b3 a3))))
+                             (+ (* (nth i (first v))  (- 1d0 tx) (- 1d0 ty))
+                                (* (nth i (second v)) tx        (- 1d0 ty))
+                                (* (nth i (third v))  (- 1d0 tx) ty)
+                                (* (nth i (fourth v)) tx        ty)))))))))
+            (let ((a (mix4 3)))
+              (if (< a 0.5d0)
+                  (values 0 0 0 0d0)
+                  (values (min 255 (round (* (mix4 0) 255) a))
+                          (min 255 (round (* (mix4 1) 255) a))
+                          (min 255 (round (* (mix4 2) 255) a))
+                          (min 1d0 (/ a 255d0)))))))))))
+
+;;; ---- the paint protocol ---------------------------------------------------
+
+(defun paint-source-p (paint)
+  "True for a paint evaluated PER PIXEL (gradient or pattern) rather than a flat
+   colour.  The rasterizer and the inverse-CTM capture both branch on this, and
+   adding a fourth source should mean adding it here and in PAINT-COLOR-AT only."
+  (or (gradient-p paint) (pattern-p paint)))
+
+(defun paint-color-at (paint ux uy)
+  "The (values r g b a) of a per-pixel PAINT at user point (UX,UY)."
+  (if (pattern-p paint)
+      (pattern-color-at paint ux uy)
+      (gradient-color-at paint ux uy)))
+
 (defun paint->solid (paint)
-  "A solid (r g b) for PAINT: the paint itself when solid, else its first stop's
-   colour (a flat approximation, used for gradient-filled text)."
-  (if (gradient-p paint)
-      (let ((s (gradient-stops paint)))
-        (if s (list (second (car s)) (third (car s)) (fourth (car s))) '(0 0 0)))
-      paint))
+  "A solid (r g b) for PAINT: the paint itself when solid, else a flat approximation
+   (used for gradient- and pattern-filled text) — a gradient's first stop, a
+   pattern's middle pixel."
+  (cond ((gradient-p paint)
+         (let ((s (gradient-stops paint)))
+           (if s (list (second (car s)) (third (car s)) (fourth (car s))) '(0 0 0))))
+        ((pattern-p paint)
+         (let ((tile (pattern-tile paint)))
+           (if (null tile) '(0 0 0)
+               (multiple-value-bind (r g b a)
+                   (pattern-color-at paint
+                                     (+ (pattern-x paint) (/ (pattern-w paint) 2))
+                                     (+ (pattern-y paint) (/ (pattern-h paint) 2)))
+                 (declare (ignore a))
+                 (list r g b)))))
+        (t paint)))
 
 (defun %lerp (a b tt) (+ a (* (- b a) tt)))
 

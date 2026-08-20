@@ -1,8 +1,13 @@
 ;;;; self-test.lisp — exercises the gesso 2D pipeline end to end.
 ;;;;   sbcl --script inspect/self-test.lisp
 (require :asdf)
-(push (truename (merge-pathnames "../" (directory-namestring *load-truename*))) asdf:*central-registry*)
-(push (truename (merge-pathnames "../../scribe/" (directory-namestring *load-truename*))) asdf:*central-registry*)
+;; EVERY sibling, not scribe by name.  scribe later grew a brotli-pure dependency, and
+;; from that day the command on line 2 died inside ASDF before the first check ran —
+;; a suite that will not start looks exactly like a suite with nothing to say.
+(let ((here (directory-namestring *load-truename*)))
+  (push (truename (merge-pathnames "../" here)) asdf:*central-registry*)
+  (dolist (d (directory (merge-pathnames "../../*/" here)))
+    (push d asdf:*central-registry*)))
 (asdf:load-system "gesso")
 (defpackage #:gesso.self-test (:use #:cl) (:local-nicknames (#:g #:gesso) (#:s #:scribe)))
 (in-package #:gesso.self-test)
