@@ -173,8 +173,13 @@
          (old (gstate-clip s)))
     (setf (gstate-clip s)
           (if old
-              (let ((r (make-array (* cw ch) :element-type 'double-float)))
-                (dotimes (i (* cw ch) r) (setf (aref r i) (* (aref old i) (aref m i)))))
+              (let ((r (make-array (* cw ch) :element-type '(unsigned-byte 8))))
+                (declare (type (simple-array (unsigned-byte 8) (*)) r old m))
+                (dotimes (i (* cw ch) r)
+                  (let ((a (aref old i)) (b (aref m i)))
+                    (declare (fixnum a b))
+                    (setf (aref r i) (cond ((= b 255) a) ((= a 255) b)
+                                           (t (floor (+ (* a b) 127) 255)))))))
               m))))
 
 ;;; ---- painting -------------------------------------------------------------
@@ -278,6 +283,62 @@
                                            (list (aref sp i) (aref sp (+ i 1)) (aref sp (+ i 2)))))))))))))
   (values))
 
+(defun %draw-image-axis-aligned (cv rgba iw ih inv ga x0 y0 x1 y1)
+  "DRAW-IMAGE-RGBA's common case, fast: an image only scaled and moved (no rotation or skew)
+   onto an opaque canvas, normal blend, no soft mask.  Which texel each device column and row
+   samples is the same for the whole column or row, so it is found once (by the same inverse
+   map, at the same pixel centres, as the general loop); a texel fully covering its pixel --
+   opaque, global alpha 1, inside the clip -- is the source itself and is stored, and any
+   other goes through %COMPOSITE as before.  The general loop's per-pixel double arithmetic
+   and colour list were the whole cost of a page's photograph, and on modus they box.
+   NIL (nothing drawn) when the case does not apply."
+  (destructuring-bind (ia ib ic id ie iff) inv
+    (declare (ignore ia id ie iff))
+    (unless (and (zerop ib) (zerop ic)
+                 (eq *blend-mode* :normal) (null *soft-mask*) (null (scribe:canvas-alpha cv))
+                 (typep rgba '(simple-array (unsigned-byte 8) (*)))
+                 (typep *clip-mask* '(or null (simple-array (unsigned-byte 8) (*)))))
+      (return-from %draw-image-axis-aligned nil))
+    (let* ((nx (- x1 x0)) (ny (- y1 y0))
+           (cols (make-array nx :element-type 'fixnum)) (rows (make-array ny :element-type 'fixnum))
+           (px (scribe:canvas-pixels cv)) (cw (scribe:canvas-width cv))
+           (clip *clip-mask*) (full (>= ga 1d0)))
+      (declare (type (simple-array fixnum (*)) cols rows)
+               (type (simple-array (unsigned-byte 8) (*)) px rgba)
+               (type fixnum nx ny cw iw ih x0 y0))
+      ;; the texel column of each device column (-1: outside the image), and row of each row
+      (dotimes (i nx)
+        (let ((u (mat-apply inv (+ x0 i 0.5d0) (+ y0 0.5d0))))
+          (setf (aref cols i) (if (and (>= u 0d0) (< u 1d0)) (min (1- iw) (max 0 (floor (* u iw)))) -1))))
+      (dotimes (j ny)
+        (multiple-value-bind (u v) (mat-apply inv (+ x0 0.5d0) (+ y0 j 0.5d0))
+          (declare (ignore u))
+          (setf (aref rows j) (if (and (>= v 0d0) (< v 1d0))
+                                  (min (1- ih) (max 0 (floor (* (- 1d0 v) ih)))) -1))))
+      (dotimes (j ny)
+        (let ((sy (aref rows j)) (py (+ y0 j)))
+          (declare (type fixnum sy py))
+          (when (>= sy 0)
+            (dotimes (i nx)
+              (let ((sx (aref cols i)) (pxi (+ x0 i)))
+                (declare (type fixnum sx pxi))
+                (when (>= sx 0)
+                  (let* ((si (* 4 (+ (* sy iw) sx)))
+                         (sa (aref rgba (+ si 3)))
+                         (k (+ (* py cw) pxi))
+                         (cm (if clip (aref (the (simple-array (unsigned-byte 8) (*)) clip) k) 255)))
+                    (declare (type fixnum si sa k cm))
+                    (if (and full (= sa 255) (= cm 255))
+                        (let ((d (* 3 k)))
+                          (setf (aref px d) (aref rgba si)
+                                (aref px (+ d 1)) (aref rgba (+ si 1))
+                                (aref px (+ d 2)) (aref rgba (+ si 2))))
+                        (let ((a (* (/ sa 255d0) ga (/ cm 255d0))))
+                          (when (> a 0d0)
+                            (%composite cv pxi py a
+                                        (list (aref rgba si) (aref rgba (+ si 1)) (aref rgba (+ si 2))))))))))))))
+      t)))
+
 (defun draw-image-rgba (ctx rgba iw ih)
   "Composite a straight-alpha RGBA image (RGBA an (IW*IH*4) octet vector, row 0 at
    the TOP) onto the canvas.  The image occupies the unit square [0,1]x[0,1] in the
@@ -304,6 +365,9 @@
           (push dx xs) (push dy ys)))
       (let ((x0 (max 0 (floor (reduce #'min xs)))) (x1 (min cw (ceiling (reduce #'max xs))))
             (y0 (max 0 (floor (reduce #'min ys)))) (y1 (min ch (ceiling (reduce #'max ys)))))
+        (when (and (< x0 x1) (< y0 y1)
+                   (%draw-image-axis-aligned cv rgba iw ih inv ga x0 y0 x1 y1))
+          (return-from draw-image-rgba (values)))
         (loop for py from y0 below y1 do
           (loop for pxi from x0 below x1 do
             (multiple-value-bind (u v) (mat-apply inv (+ pxi 0.5d0) (+ py 0.5d0))

@@ -45,8 +45,8 @@
                       (reduce #'max xs) (reduce #'max ys))))))))
 
 (defvar *clip-mask* nil
-  "When bound to a device-space coverage array (canvas-width*canvas-height doubles,
-   0..1), every fill/stroke coverage is multiplied by it — the intersection of the
+  "When bound to a device-space coverage array (canvas-width*canvas-height octets,
+   0..255 for 0..1), every fill/stroke coverage is multiplied by it — the intersection of the
    active clip regions (SVG clip-path / canvas clip()).  NIL = no clip.")
 
 (defvar *blend-mode* :normal
@@ -74,7 +74,8 @@
   (if *clip-mask*
       (let ((cw (scribe:canvas-width cv)) (ch (scribe:canvas-height cv)))
         (if (and (>= px 0) (< px cw) (>= py 0) (< py ch))
-            (aref *clip-mask* (+ (* py cw) px))
+            (* (aref (the (simple-array (unsigned-byte 8) (*)) *clip-mask*) (+ (* py cw) px))
+               (/ 1d0 255))
             0d0))
       1d0))
 
@@ -260,49 +261,66 @@
                 (when (> c 0d0)
                   (%composite cv px py (* c a) paint)))))))))
 
-(defun %evenodd-coverage (subpaths)
+(defun %frame (minx miny maxx maxy cw ch)
+  "The device frame a fill over MINX..MAXX x MINY..MAXY is rasterized in: (values IX0 IY0 W H),
+   or NIL when none of it is on the CW x CH canvas.  NOT the whole shape -- a page-wide
+   rectangle drawn into a strip of the page (folio's :WINDOW) wants only the strip, not a
+   page of doubles for every fill; the shape's part off the canvas is accounted for by
+   scribe's rasterizer, not drawn.  CW NIL: the shape's own bounds, as before."
+  (let* ((ix0 (floor minx)) (iy0 (floor miny))
+         (w (max 1 (+ 2 (ceiling (- maxx ix0))))) (h (max 1 (+ 2 (ceiling (- maxy iy0))))))
+    (if (null cw)
+        (values ix0 iy0 w h)
+        (let* ((cx0 (max 0 ix0)) (cy0 (max 0 iy0))
+               (cx1 (min cw (+ ix0 w))) (cy1 (min ch (+ iy0 h))))
+          (when (and (< cx0 cx1) (< cy0 cy1))
+            (values cx0 cy0 (- cx1 cx0) (- cy1 cy0)))))))
+
+(defun %evenodd-coverage (subpaths &optional cw ch)
   "(values COV W H IX0 IY0): even-odd combined coverage over the union bbox of
    SUBPATHS.  Each subpath is rasterized independently (its non-zero interior) in a
    frame anchored at the union top-left, then XOR-combined (a+b-2ab) so overlapping
    interiors cancel — the even-odd rule for non-self-intersecting subpaths."
   (multiple-value-bind (minx miny maxx maxy) (%paths-bbox subpaths)
-    (when minx
-      (let* ((ix0 (floor minx)) (iy0 (floor miny))
-             (w (max 1 (+ 2 (ceiling (- maxx ix0)))))
-             (h (max 1 (+ 2 (ceiling (- maxy iy0)))))
-             (acc (make-array (* w h) :element-type 'double-float :initial-element 0d0)))
+    (multiple-value-bind (ix0 iy0 w h) (and minx (%frame minx miny maxx maxy cw ch))
+     (when ix0
+      (let* ((acc (make-array (* w h) :element-type 'double-float :initial-element 0d0)))
         (dolist (sp subpaths)
           (let ((c (%subpath-contour sp)))
             (when c
               (multiple-value-bind (cov cw ch)
                   (scribe:rasterize-outline (list c) 1d0
-                                            :origin-x (df ix0) :origin-y (df (- iy0)))
+                                            :origin-x (df ix0) :origin-y (df (- iy0))
+                                            :max-w w :max-h h)
                 (when cov
                   (dotimes (yy (min ch h))
                     (dotimes (xx (min cw w))
                       (let* ((idx (+ (* yy w) xx))
                              (a (aref acc idx)) (v (aref cov (+ (* yy cw) xx))))
                         (setf (aref acc idx) (+ a v (* -2d0 a v)))))))))))
-        (values acc w h ix0 iy0)))))
+        (values acc w h ix0 iy0))))))
 
 (defun fill-subpaths (cv subpaths paint alpha &optional inv fill-rule)
   "Fill SUBPATHS onto scribe canvas CV with PAINT and ALPHA.  PAINT is a solid
    colour or a GRADIENT (evaluated through INV, the inverse CTM).  FILL-RULE is
    :nonzero (default) or :evenodd."
   (if (eq fill-rule :evenodd)
-      (multiple-value-bind (cov w h ix0 iy0) (%evenodd-coverage subpaths)
+      (multiple-value-bind (cov w h ix0 iy0)
+          (%evenodd-coverage subpaths (scribe:canvas-width cv) (scribe:canvas-height cv))
         (when cov (%blit-coverage cv cov w h ix0 iy0 paint alpha inv)))
-      (multiple-value-bind (minx miny) (%paths-bbox subpaths)
-        (when minx
-          (let* ((ix0 (floor minx)) (iy0 (floor miny))
-                 (contours (loop for sp in subpaths
-                                 for c = (%subpath-contour sp)
-                                 when c collect c)))
-            (when contours
-              (multiple-value-bind (cov w h)
-                  (scribe:rasterize-outline contours 1d0
-                                            :origin-x (df ix0) :origin-y (df (- iy0)))
-                (when cov (%blit-coverage cv cov w h ix0 iy0 paint alpha inv)))))))))
+      (multiple-value-bind (minx miny maxx maxy) (%paths-bbox subpaths)
+        (multiple-value-bind (ix0 iy0 fw fh)
+            (and minx (%frame minx miny maxx maxy (scribe:canvas-width cv) (scribe:canvas-height cv)))
+          (when ix0
+            (let ((contours (loop for sp in subpaths
+                                  for c = (%subpath-contour sp)
+                                  when c collect c)))
+              (when contours
+                (multiple-value-bind (cov w h)
+                    (scribe:rasterize-outline contours 1d0
+                                              :origin-x (df ix0) :origin-y (df (- iy0))
+                                              :max-w fw :max-h fh)
+                  (when cov (%blit-coverage cv cov w h ix0 iy0 paint alpha inv))))))))))
 
 (defun %clip-bounds (cv clip)
   "Device bounding box (values X0 Y0 X1 Y1, half-open) of the nonzero region of the
@@ -315,7 +333,7 @@
           (dotimes (y ch)
             (let ((row (* y cw)))
               (dotimes (x cw)
-                (when (> (aref clip (+ row x)) 0d0)
+                (when (> (aref clip (+ row x)) 0)
                   (when (< x minx) (setf minx x))
                   (when (> x maxx) (setf maxx x))
                   (when (< y miny) (setf miny y))
@@ -394,10 +412,54 @@
                   (%composite cv px py cov (list r g b)))))))))
     (values)))
 
+(defun %axis-rect (subpaths)
+  "(values X0 Y0 X1 Y1) when SUBPATHS are one axis-aligned rectangle in device space (four
+   corners, each edge horizontal or vertical, closed or not), else NIL."
+  (when (and subpaths (null (cdr subpaths)))
+    (let* ((pts (subpath-points (first subpaths))) (n (length pts)))
+      (when (and (= n 5) (equal (aref pts 0) (aref pts 4))) (setf n 4))
+      (when (= n 4)
+        (let ((ok t))
+          (dotimes (i 4)
+            (let ((p (aref pts i)) (q (aref pts (mod (1+ i) 4))))
+              (unless (or (= (car p) (car q)) (= (cdr p) (cdr q))) (setf ok nil))))
+          (let ((xs (remove-duplicates (loop for i below 4 collect (car (aref pts i)))))
+                (ys (remove-duplicates (loop for i below 4 collect (cdr (aref pts i))))))
+            (when (and ok (= (length xs) 2) (= (length ys) 2))
+              (values (reduce #'min xs) (reduce #'min ys) (reduce #'max xs) (reduce #'max ys)))))))))
+
+(defun %rect-coverage-mask (cw ch x0 y0 x1 y1)
+  "SUBPATHS-COVERAGE-MASK of the rectangle X0..X1 x Y0..Y1, directly: a pixel's coverage is its
+   column's overlap times its row's, so the inside is 255 and only the edges are worked out.  A
+   PDF clips every page to its box, and every strip of a page made that mask through the general
+   rasterizer -- a page of doubles -- which on modus was nearly all of a strip's time."
+  (let ((mask (make-array (* cw ch) :element-type '(unsigned-byte 8) :initial-element 0))
+        (cols (make-array cw :element-type '(unsigned-byte 8) :initial-element 0)))
+    (declare (type (simple-array (unsigned-byte 8) (*)) mask cols) (fixnum cw ch))
+    (flet ((overlap (a lo hi) (max 0d0 (min 1d0 (- (min hi (+ a 1d0)) (max lo (float a 1d0)))))))
+      (let ((cx0 (max 0 (floor x0))) (cx1 (min cw (ceiling x1)))
+            (ry0 (max 0 (floor y0))) (ry1 (min ch (ceiling y1))))
+        (loop for x from cx0 below cx1
+              do (setf (aref cols x) (round (* 255 (overlap x x0 x1)))))
+        (loop for y from ry0 below ry1
+              do (let ((cy (overlap y y0 y1)) (row (* y cw)))
+                   (if (>= cy 1d0)
+                       (replace mask cols :start1 (+ row cx0) :start2 cx0 :end2 cx1)
+                       (loop for x from cx0 below cx1
+                             do (setf (aref mask (+ row x)) (round (* 255 cy (overlap x x0 x1))))))))))
+    mask))
+
 (defun subpaths-coverage-mask (cw ch subpaths &optional (fill-rule :nonzero))
-  "A CW*CH device-space coverage mask (double 0..1) for the FILL of SUBPATHS — the
-   region a clip() would keep.  FILL-RULE is :nonzero or :evenodd."
-  (let ((mask (make-array (* cw ch) :element-type 'double-float :initial-element 0d0)))
+  "A CW*CH device-space coverage mask (octets, 0..255 for 0..1) for the FILL of SUBPATHS
+   — the region a clip() would keep.  FILL-RULE is :nonzero or :evenodd.
+
+   OCTETS, NOT DOUBLES: a clip is a whole page's worth of coverage, kept for as long as
+   the graphics state that set it, and a PDF nests them.  At doubles a 1152x648 page
+   held three clips in 18 MB -- more than a phone's 64 MB document worker could carry
+   and still render -- where a 255th of coverage is finer than any screen shows."
+  (multiple-value-bind (rx0 ry0 rx1 ry1) (%axis-rect subpaths)
+    (when rx0 (return-from subpaths-coverage-mask (%rect-coverage-mask cw ch rx0 ry0 rx1 ry1))))
+  (let ((mask (make-array (* cw ch) :element-type '(unsigned-byte 8) :initial-element 0)))
     (flet ((stamp (cov w h ix0 iy0)
              (when cov
                (dotimes (yy h)
@@ -407,18 +469,19 @@
                        (let ((px (+ ix0 xx)))
                          (when (and (>= px 0) (< px cw))
                            (setf (aref mask (+ (* py cw) px))
-                                 (aref cov (+ (* yy w) xx))))))))))))
+                                 (round (* 255 (max 0d0 (min 1d0 (aref cov (+ (* yy w) xx))))))))))))))))
       (if (eq fill-rule :evenodd)
-          (multiple-value-bind (cov w h ix0 iy0) (%evenodd-coverage subpaths)
+          (multiple-value-bind (cov w h ix0 iy0) (%evenodd-coverage subpaths cw ch)
             (stamp cov w h ix0 iy0))
-          (multiple-value-bind (minx miny) (%paths-bbox subpaths)
-            (when minx
-              (let* ((ix0 (floor minx)) (iy0 (floor miny))
-                     (contours (loop for sp in subpaths for c = (%subpath-contour sp)
-                                     when c collect c)))
-                (when contours
-                  (multiple-value-bind (cov w h)
-                      (scribe:rasterize-outline contours 1d0
-                                                :origin-x (df ix0) :origin-y (df (- iy0)))
-                    (stamp cov w h ix0 iy0))))))))
+          (multiple-value-bind (minx miny maxx maxy) (%paths-bbox subpaths)
+            (multiple-value-bind (ix0 iy0 fw fh) (and minx (%frame minx miny maxx maxy cw ch))
+              (when ix0
+                (let ((contours (loop for sp in subpaths for c = (%subpath-contour sp)
+                                      when c collect c)))
+                  (when contours
+                    (multiple-value-bind (cov w h)
+                        (scribe:rasterize-outline contours 1d0
+                                                  :origin-x (df ix0) :origin-y (df (- iy0))
+                                                  :max-w fw :max-h fh)
+                      (stamp cov w h ix0 iy0)))))))))
     mask))
