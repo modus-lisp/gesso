@@ -439,6 +439,10 @@
     (flet ((overlap (a lo hi) (max 0d0 (min 1d0 (- (min hi (+ a 1d0)) (max lo (float a 1d0)))))))
       (let ((cx0 (max 0 (floor x0))) (cx1 (min cw (ceiling x1)))
             (ry0 (max 0 (floor y0))) (ry1 (min ch (ceiling y1))))
+        ;; a rectangle wholly beside or above the canvas -- a strip of a page, where most of
+        ;; a tiling pattern's cells are -- covers none of it (and REPLACE would refuse
+        ;; :START2 past :END2)
+        (unless (and (< cx0 cx1) (< ry0 ry1)) (return-from %rect-coverage-mask mask))
         (loop for x from cx0 below cx1
               do (setf (aref cols x) (round (* 255 (overlap x x0 x1)))))
         (loop for y from ry0 below ry1
